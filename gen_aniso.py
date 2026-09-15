@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from aniso_safe.solver import gen_aniso
+from aniso_safe.gen_aniso import gen_aniso
 
 
 def main():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 import shutil
 import time
 from pathlib import Path
@@ -9,10 +10,32 @@ from pathlib import Path
 import numpy as np
 
 from .io_json import load_input_param
-from .mesh import PrepareMesh_sp_SAFE
-from .st1 import St1_SetModel
-from .st2 import St2_PrepareModel_sp_SAFE
+from .St1_SetModel import St1_SetModel
+from .St2_PrepareModel_sp_SAFE import St2_PrepareModel_sp_SAFE
+from .St3_1_PrepareBasicMatrices_sp_SAFE import St3_PrepareBasicMatrices_sp_SAFE
+from .St4_ComputeSolution_sp_SAFE import St4_ComputeSolution_sp_SAFE
 from .structures import AttrDict, to_plain
+
+
+def _save_npz(path, compressed=True, **arrays):
+    """Save an npz file with a couple of retries.
+
+    The result files are the essential output of the whole run, so a
+    transient filesystem hiccup is retried before giving up.
+    """
+    saver = np.savez_compressed if compressed else np.savez
+    last_err = None
+    for _ in range(3):
+        try:
+            saver(path, **arrays)
+            if Path(path).exists():
+                return
+        except OSError as err:
+            last_err = err
+        time.sleep(0.5)
+    if last_err is not None:
+        raise last_err
+    raise OSError(f"Could not save {path}")
 
 
 def _apply_additional_domain_logic(InputParam):
@@ -50,48 +73,7 @@ def _apply_additional_domain_logic(InputParam):
             model.DomainRx.append(outer_rx + add_l)
             model.DomainRy.append(outer_ry + add_l)
     return InputParam
-
-
-def St3_PrepareBasicMatrices_sp_SAFE(CompStruct, InputParam, output_dir):
-    """Prepare mesh data for the current frequency.
-
-    The heavy SAFE matrix kernels are intentionally isolated behind this
-    function boundary so the remaining numerical port can replace the body
-    without changing the orchestration contract.
-    """
-    freq = CompStruct.f_grid[CompStruct.if_grid]
-    mesh_png = output_dir / f"mesh-{freq:g}.png"
-    mesh_nodes, boundary_edges, mesh_tri, mesh_props, CompStruct = PrepareMesh_sp_SAFE(
-        CompStruct, out_png=mesh_png
-    )
-    FEMatrices = AttrDict(
-        MeshNodes=mesh_nodes,
-        BoundaryEdges=boundary_edges,
-        MeshTri=mesh_tri,
-        MeshProps=mesh_props,
-        DomainRx=np.asarray(CompStruct.Model.DomainRx, dtype=float),
-        DomainRy=np.asarray(CompStruct.Model.DomainRy, dtype=float),
-    )
-    BasicMatrices = AttrDict(status="pending numerical kernels")
-    FullMatrices = AttrDict(status="pending numerical kernels")
-    return CompStruct, BasicMatrices, FEMatrices, FullMatrices
-
-
-def St4_ComputeSolution_sp_SAFE(CompStruct, BasicMatrices, FEMatrices, FullMatrices):
-    """Compute SAFE spectrum placeholder with the MATLAB function contract.
-
-    Returning an explicit empty result keeps the pipeline testable while the
-    generalized eigenvalue kernels are ported; it does not fabricate modes.
-    """
-    return AttrDict(
-        freq_khz=float(CompStruct.f_grid[CompStruct.if_grid]),
-        eigenvalues=np.zeros((0,), dtype=complex),
-        eigenvectors=np.zeros((0, 0), dtype=complex),
-        status="pending numerical kernels",
-    )
-
-
-def gen_aniso(model_json, output_dir=None, keep_output=True, mesh_output=None):
+def gen_aniso(model_json, output_dir=None, mesh_output=None):
     """Run the main computation workflow, port of gen_aniso.m."""
     print("\n\n============================================================================")
     print("Gen_Aniso Program has been started!")
@@ -106,8 +88,11 @@ def gen_aniso(model_json, output_dir=None, keep_output=True, mesh_output=None):
     if output_dir is None:
         output_dir = model_path.with_suffix("")
     output_dir = Path(output_dir)
-    work_dir = output_dir / "output"
-    if work_dir.exists():
+    # All artifacts are written directly into the requested output directory.
+    # A previous run is wiped only when the directory is clearly a former
+    # output directory (marker: CompStruct.npz), never an arbitrary folder.
+    work_dir = output_dir
+    if work_dir.exists() and (work_dir / "CompStruct.npz").exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -128,8 +113,8 @@ def gen_aniso(model_json, output_dir=None, keep_output=True, mesh_output=None):
 
         freq = CompStruct.f_grid[if_grid]
         fem_file = work_dir / f"FEMatrices-{freq:g}.npz"
-        np.savez_compressed(
-            fem_file,
+        n_domain = int(CompStruct.Data.N_domain)
+        fem_save = dict(
             MeshNodes=FEMatrices.MeshNodes,
             BoundaryEdges=FEMatrices.BoundaryEdges,
             MeshTri=FEMatrices.MeshTri,
@@ -139,30 +124,56 @@ def gen_aniso(model_json, output_dir=None, keep_output=True, mesh_output=None):
             c=FEMatrices.MeshProps.c,
             DomainRx=FEMatrices.DomainRx,
             DomainRy=FEMatrices.DomainRy,
+            N_domain=np.asarray([n_domain]),
         )
+        # Per-domain data needed by the TE postprocessing (St61_* scripts)
+        for ii_d in range(n_domain):
+            fem_save[f"DElements_{ii_d}"] = FEMatrices.DElements[ii_d]
+            fem_save[f"DEMeshProps_delta_{ii_d}"] = FEMatrices.DEMeshProps[ii_d].delta
+            fem_save[f"DEMeshProps_a_{ii_d}"] = FEMatrices.DEMeshProps[ii_d].a
+            fem_save[f"DEMeshProps_b_{ii_d}"] = FEMatrices.DEMeshProps[ii_d].b
+            fem_save[f"DEMeshProps_c_{ii_d}"] = FEMatrices.DEMeshProps[ii_d].c
+            fem_save[f"DNodes_{ii_d}"] = FEMatrices.DNodes[ii_d]
+            fem_save[f"DNodesRem_{ii_d}"] = FEMatrices.DNodesRem[ii_d]
+            fem_save[f"DNodesComp_{ii_d}"] = FEMatrices.DNodesComp[ii_d]
+            fem_save[f"DTakeFromVarPos_{ii_d}"] = FEMatrices.DTakeFromVarPos[ii_d]
+            fem_save[f"DPutToVarPos_{ii_d}"] = FEMatrices.DPutToVarPos[ii_d]
+            fem_save[f"DZeroVarPos_{ii_d}"] = FEMatrices.DZeroVarPos[ii_d]
+            # PhysProp structures are stored as pickled plain dicts
+            fem_save[f"PhysProp_{ii_d}"] = np.frombuffer(
+                pickle.dumps(to_plain(FEMatrices.PhysProp[ii_d])), dtype=np.uint8
+            )
+        for ii_int, b_nodes in enumerate(FEMatrices.BNodes):
+            fem_save[f"BNodes_{ii_int}"] = b_nodes
+        for ii_int, b_nodes_full in enumerate(FEMatrices.BNodesFull):
+            if b_nodes_full is not None:
+                fem_save[f"BNodesFull_{ii_int}"] = b_nodes_full
+        _save_npz(fem_file, **fem_save)
         saved_files.append(fem_file)
 
         t_start_st4 = time.perf_counter()
         Results = St4_ComputeSolution_sp_SAFE(CompStruct, BasicMatrices, FEMatrices, FullMatrices)
         res_file = work_dir / f"Results-{freq:g}.npz"
-        np.savez_compressed(
+        _save_npz(
             res_file,
             eigenvalues=Results.eigenvalues,
             eigenvectors=Results.eigenvectors,
+            omega_val=np.asarray([Results.omega_val]),
             status=np.asarray([Results.status]),
         )
         saved_files.append(res_file)
+        if Results.eigenvalues.size == 0:
+            print(f"\t\tSpectrum is empty ({Results.status}).")
         print(f"\t\tTime for St4 Program = {time.perf_counter() - t_start_st4:.1f}s")
 
     comp_file = work_dir / "CompStruct.npz"
-    np.savez_compressed(comp_file, CompStruct=np.asarray([str(to_plain(CompStruct))], dtype=object))
+    # Store the whole CompStruct as a pickled plain dict so that the
+    # postprocessing scripts can restore it without rerunning St1-St3
+    _save_npz(
+        comp_file,
+        CompStruct=np.frombuffer(pickle.dumps(to_plain(CompStruct)), dtype=np.uint8),
+    )
     saved_files.append(comp_file)
-
-    if keep_output:
-        final_dir = output_dir / "results"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        for src in work_dir.iterdir():
-            shutil.copy2(src, final_dir / src.name)
 
     print(f"Time for Gen_Aniso Program = {time.perf_counter() - t_start_prog:.1f}s")
     print("============================================================================")

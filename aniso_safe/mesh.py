@@ -220,6 +220,73 @@ def AddNodesCubic(MeshNodes, MeshTri):
     return mesh_nodes_cubic, mesh_tri_cubic, mesh_props
 
 
+def FindEdgeOrient(DBEdge, MeshTri, MeshNodes):
+    """Orient one boundary edge counterclockwise, port of FindEdgeOrient.m."""
+    node1 = int(DBEdge[0])
+    node2 = int(DBEdge[1])
+    # find triangles containing the first node of the edge (only triangles
+    # belonging to the domain in question are passed to this procedure)
+    cols = np.nonzero((MeshTri[0:3, :] == node1).any(axis=0))[0]
+    # among found triangles, select the one containing the second node
+    match = (MeshTri[0:3, cols] == node2).any(axis=0)
+    column = cols[np.nonzero(match)[0][0]]
+    # find the third node of the triangle, containing the edge
+    tri = MeshTri[0:3, column]
+    node3 = int(tri[(tri != node1) & (tri != node2)][0])
+
+    # Define the vector, which is directed inside the triangle
+    inner_vector = np.array(
+        [
+            (MeshNodes[0, node1] + MeshNodes[0, node2]) / 2.0 - MeshNodes[0, node3],
+            (MeshNodes[1, node1] + MeshNodes[1, node2]) / 2.0 - MeshNodes[1, node3],
+        ]
+    )
+    # Define the vector, which is directed along the path of the triangle
+    tangent_vector = np.array(
+        [
+            MeshNodes[0, node2] - MeshNodes[0, node1],
+            MeshNodes[1, node2] - MeshNodes[1, node1],
+        ]
+    )
+    # the z component of the cross product determines the orientation
+    sign_orientation = tangent_vector[0] * inner_vector[1] - tangent_vector[1] * inner_vector[0]
+    out = np.asarray(DBEdge, dtype=int).copy()
+    # switch the direction of the edge so that the path goes counterclockwise
+    if sign_orientation > 0:
+        out[0], out[1] = out[1], out[0]
+    return out
+
+
+def MakeContBEdges(DBEdges, MeshTri, MeshNodes, CompStruct):
+    """Make a continuous oriented boundary, port of MakeContBEdges.m."""
+    if DBEdges.shape[1] == 0:
+        return DBEdges
+    edges = np.asarray(DBEdges, dtype=int).copy()
+    cont = [FindEdgeOrient(edges[:, 0], MeshTri, MeshNodes)]
+    edges = np.delete(edges, 0, axis=1)
+    while edges.shape[1]:
+        end_node = cont[-1][1]
+        found = None
+        for col in range(edges.shape[1]):
+            # find the edge, which is the continuation of the previous one
+            if edges[0, col] == end_node:
+                found = (col, False)
+                break
+            if edges[1, col] == end_node:
+                found = (col, True)
+                break
+        if found is None:
+            raise ValueError("MakeContBEdges: the boundary is not continuous")
+        col, swap = found
+        edge = edges[:, col].copy()
+        # switch the order of nodes in the edge as necessary
+        if swap:
+            edge[0], edge[1] = edge[1], edge[0]
+        cont.append(edge)
+        edges = np.delete(edges, col, axis=1)
+    return np.column_stack(cont)
+
+
 def FindBEdges(MeshNodes, MeshTri, CompStruct):
     """Identify domain boundary edges, port of FindBEdges.m."""
     edge_domains = defaultdict(list)
@@ -234,13 +301,22 @@ def FindBEdges(MeshNodes, MeshTri, CompStruct):
     for (a, b), domains in edge_domains.items():
         unique = sorted(set(domains))
         if len(domains) == 1 or len(unique) > 1:
-            domain = unique[0] if len(unique) == 1 else unique[0]
+            # identify the smallest domain number, which the edge belongs to
+            domain = unique[0]
             rows.append((a, b, domain))
     if not rows:
         return np.zeros((3, 0), dtype=int)
     bedges = np.asarray(rows, dtype=int).T
     order = np.argsort(bedges[2, :], kind="mergesort")
-    return bedges[:, order]
+    bedges = bedges[:, order]
+
+    # make continuous (and consistently oriented) boundary for each domain
+    continuous = []
+    for ii_d in range(1, int(CompStruct.Data.N_domain) + 1):
+        edges_d = bedges[:, bedges[2, :] == ii_d]
+        tri_d = MeshTri[:, MeshTri[3, :] == ii_d]
+        continuous.append(MakeContBEdges(edges_d, tri_d, MeshNodes, CompStruct))
+    return np.column_stack(continuous)
 
 
 def plot_mesh(MeshNodes, MeshTri, BoundaryEdges, out_png, title="SAFE mesh"):
@@ -264,7 +340,12 @@ def plot_mesh(MeshNodes, MeshTri, BoundaryEdges, out_png, title="SAFE mesh"):
     ax.set_title(title)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(out_png, dpi=180)
+    try:
+        fig.savefig(out_png, dpi=180)
+    except OSError:
+        # the mesh figure is a control output only; a filesystem hiccup
+        # must not abort the whole computation
+        print(f"\tWarning: could not save the mesh figure {out_png}")
     plt.close(fig)
     return out_png
 

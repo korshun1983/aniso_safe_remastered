@@ -7,37 +7,50 @@ import numpy as np
 from .structures import AttrDict
 
 
-def _vti_velocities_km_s(param):
-    """Compute simple VTI reference velocities in km/s.
-
-    Density is given in kg/cm^3 and moduli in GPa, therefore
-    v[km/s] = sqrt(C[GPa] / rho[kg/cm^3]).
-    """
-    arr = np.asarray(param, dtype=float)
-    rho = arr[0]
-    c11, c13, c33, c44, c66 = arr[1:6]
-    return {
-        "V_qP": float(np.sqrt(c11 / rho)),
-        "V_SH": float(np.sqrt(c44 / rho)),
-        "V_SV": float(np.sqrt(c44 / rho)),
-    }
-
-
 def ComputeAsymptotesSAFE(CompStruct):
-    """Compute asymptotic reference velocities, port role of ComputeAsymptotesSAFE.m.
+    """Compute asymptotes of the dispersion curves, port of ComputeAsymptotesSAFE.m.
 
-    This is the isotropic/VTI reference estimate used for search limits. The
-    exact rotated HTI phase-velocity routine remains a separate numerical
-    kernel to be ported from V_phase_VTI_exact_RPH.m.
+    Computes the mud velocity, the exact VTI bulk phase velocities of the
+    outer formation along the waveguide axis (via V_phase_VTI_exact_RPH)
+    and the low-frequency Stoneley asymptote. Velocities are in km/s
+    (raw model units: sqrt(GPa / (g/cm^3)) = km/s).
     """
-    ref_type = CompStruct.Model.RefDomainType[0]
-    ref_param = CompStruct.Model.RefDomainParam[0]
-    if ref_type == "HTTI":
-        return AttrDict(_vti_velocities_km_s(ref_param))
-    if ref_type == "fluid":
-        rho, lam = float(ref_param[0]), float(ref_param[1])
-        return AttrDict(V_qP=float(np.sqrt(lam / rho)), V_SH=0.0, V_SV=0.0)
-    raise NotImplementedError(f"Unsupported RefDomainType: {ref_type}")
+    from . import fematrices as fe
+
+    asymptotes = AttrDict()
+
+    # Compute asymptote for mud layer, if it is present in the model
+    mud_domain = int(CompStruct.Model.get("mud_domain", 0))
+    if mud_domain != 0:
+        # extract mud properties (1-based domain number in MATLAB)
+        mud_properties = CompStruct.Model.DomainParam[mud_domain - 1]
+        rho_mud = float(mud_properties[0])
+        lambda_mud = float(mud_properties[1])
+        # compute V_mud
+        asymptotes.V_mud = float(np.sqrt(lambda_mud / rho_mud))
+
+    # Compute asymptotes for the outer formation, if it is TTI
+    n_domain = int(CompStruct.Data.N_domain)
+    if CompStruct.Model.DomainType[n_domain - 1] == "HTTI":
+        # extract outer formation parameters
+        formation_properties = CompStruct.Model.DomainParam[n_domain - 1]
+        rho = 1.0e3 * float(formation_properties[0])
+        c_main = np.asarray(formation_properties[1:6], dtype=float)
+        theta = float(formation_properties[6])
+        # compute Christoffel equation solution according to
+        # the Rock Physics Handbook
+        v_qp, v_qsv, v_sh = fe.call_method(
+            CompStruct.Methods.V_phase_VTI_exact_RPH, rho, c_main, theta
+        )
+        asymptotes.V_qP = 1.0e-3 * v_qp
+        asymptotes.V_qSV = 1.0e-3 * v_qsv
+        asymptotes.V_SH = 1.0e-3 * v_sh
+        # compute the Stoneley wave speed (low-frequency asymptote)
+        # for VTI homogeneous formation
+        if mud_domain != 0:
+            asymptotes.V_St = float(1.0 / np.sqrt(rho_mud * (1.0 / lambda_mud + 1.0 / c_main[4])))
+
+    return asymptotes
 
 
 def St2_1_PrepareModelParams_sp_SAFE(CompStruct):

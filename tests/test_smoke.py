@@ -6,8 +6,8 @@ import numpy as np
 
 from aniso_safe.io_json import load_input_param
 from aniso_safe.mesh import PrepareMesh_sp_SAFE
-from aniso_safe.st1 import St1_SetModel
-from aniso_safe.st2 import St2_PrepareModel_sp_SAFE
+from aniso_safe.St1_SetModel import St1_SetModel
+from aniso_safe.St2_PrepareModel_sp_SAFE import St2_PrepareModel_sp_SAFE
 
 
 def test_json_mesh_pipeline(tmp_path):

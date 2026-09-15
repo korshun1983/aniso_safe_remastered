@@ -26,18 +26,33 @@ def _parse_matlab_range(value):
         m3 = range_re.match(token)
         if m3:
             start, step, stop = map(float, m3.groups())
-            count = int(round((stop - start) / step)) + 1
+            count = int(np.floor((stop - start) / step + 1e-12)) + 1
             numbers.extend((start + i * step for i in range(count)))
             continue
         m2 = two_re.match(token)
         if m2:
             start, stop = map(float, m2.groups())
             step = 1.0 if stop >= start else -1.0
-            count = int(round((stop - start) / step)) + 1
+            count = int(np.floor((stop - start) / step + 1e-12)) + 1
             numbers.extend((start + i * step for i in range(count)))
             continue
         numbers.append(float(token))
     return numbers
+
+
+def _parse_start_step_stop(value):
+    """Parse a frequency object {'start': a, 'step': b, 'stop': c}."""
+    if not isinstance(value, dict):
+        return value
+    start = float(value["start"])
+    step = float(value.get("step", 1.0))
+    stop = float(value["stop"])
+    if step == 0:
+        raise ValueError("f_array step must be nonzero")
+    count = int(np.floor((stop - start) / step + 1e-12)) + 1
+    if count < 1:
+        raise ValueError("f_array start/step/stop produce an empty range")
+    return [start + i * step for i in range(count)]
 
 
 def _normalize_arrays(model):
@@ -45,8 +60,15 @@ def _normalize_arrays(model):
     for field in ("DomainRx", "DomainRy", "DomainTheta", "DomainEcc", "DomainEccAngle", "DomainNth"):
         if field in model:
             model[field] = [float(v) for v in np.atleast_1d(model[field])]
+    if "f_array" not in model and {"f_start", "f_stop"} <= set(model):
+        model["f_array"] = {
+            "start": model["f_start"],
+            "step": model.get("f_step", 1.0),
+            "stop": model["f_stop"],
+        }
     if "f_array" in model:
-        model["f_array"] = [float(v) for v in np.atleast_1d(_parse_matlab_range(model["f_array"]))]
+        parsed = _parse_start_step_stop(model["f_array"])
+        model["f_array"] = [float(v) for v in np.atleast_1d(_parse_matlab_range(parsed))]
     if "DomainParam" in model:
         model["DomainParam"] = [[float(v) for v in np.atleast_1d(row)] for row in model["DomainParam"]]
     if "RefDomainParam" in model:
