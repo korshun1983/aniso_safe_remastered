@@ -60,18 +60,10 @@ def _apply_additional_domain_logic(InputParam):
         model.BCType[-1] = "SSstiff"
         model.BCType.append("rigid")
         model.DomainNth.append(model.DomainNth[-1])
-        outer_rx = float(model.DomainRx[-1])
-        outer_ry = float(model.DomainRy[-1])
-        add_l = float(model.get("AddDomainL", 0.0))
-        if str(model.get("LDomain_in_LSH", "yes")).lower() == "yes":
-            # The wavelength-based extension requires the SH asymptote and is
-            # finalized in St2 after CheckAsymptote. Keep the relative length
-            # here and use it as an additive radius increment at this stage.
-            model.DomainRx.append(outer_rx + add_l)
-            model.DomainRy.append(outer_ry + add_l)
-        else:
-            model.DomainRx.append(outer_rx + add_l)
-            model.DomainRy.append(outer_ry + add_l)
+        # Deliberately do NOT append DomainRx/DomainRy here.  The MATLAB
+        # gen_aniso.m only appends the additional domain metadata; its radii
+        # are created in St3 for every frequency.  This matters both for
+        # LDomain_in_LSH='yes' and for a fixed-thickness PML/ABC layer.
     return InputParam
 def gen_aniso(model_json, output_dir=None, mesh_output=None):
     """Run the main computation workflow, port of gen_aniso.m."""

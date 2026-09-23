@@ -14,7 +14,7 @@ This project is a faithful step-by-step Python port of the MATLAB `matlab_test_c
 - Mode classification and TE-based dispersion plots (`aniso_safe/intr_te.py`, port of `intr_aniso_TE.m`): monopole / flexural ± / quadrupole ± / 3pole ± classification, `changer_12` swap, full slowness/velocity figures and per-mode-class PNG figures with the qP/qSV/SH/St asymptote lines. The plain dispersion figures (`plot_aniso_TE2.py`, `plot_aniso.py`) draw the same asymptotes when `CompStruct.npz` is present.
 - Orchestration and persistence (`aniso_safe/gen_aniso.py`, port of `gen_aniso.m`): `FEMatrices-<freq>.npz`, `Results-<freq>.npz`, `CompStruct.npz`, and `mesh-<freq>.png` when mesh output is enabled.
 
-The dispersion curves are computed by Python itself. `Advanced.EigSearchStart` is the phase velocity (km/s) near which the eigensolver searches for modes; pick it close to the velocities of interest (e.g. `1.5` for fluid-dominated modes). The PML/ABC additional-domain kernels (`KM_el_matrix_HTTI_PML/ABC`, `MatricesPartsPML/ABC`) and the frequency-dependent additional-domain geometry (`LDomain_in_LSH == 'yes'`) are still pending.
+The dispersion curves are computed by Python itself. `Advanced.EigSearchStart` is the phase velocity (km/s) near which the eigensolver searches for modes; pick it close to the velocities of interest (e.g. `1.5` for fluid-dominated modes). Frequency-dependent `LDomain_in_LSH == 'yes'` geometry is rebuilt inside the frequency loop, matching MATLAB `St3_1_PrepareBasicMatrices_sp_SAFE.m`. The HTTI `abc`, `pml`, and `pml+abc` element kernels are implemented with complex-valued sparse assembly.
 
 ## Project structure
 
@@ -58,6 +58,25 @@ All artifacts (`CompStruct.npz`, `FEMatrices-<freq>.npz`, `Results-<freq>.npz`,
 Pass this same directory as `--dir` to every post-processing script below.
 As a fallback the post-processing tools also look one level below into
 `output/` and `results/` subdirectories.
+
+
+### Bakken MATLAB-reference regression runs
+
+Two ready-to-run models mirror the shortened MATLAB scenarios used for port validation:
+
+```bash
+# ABC + frequency-dependent geometry
+python3 gen_aniso.py --model models/bakken_b_reference_abc.json --output-dir out_bakken_abc --mesh-output no
+
+# Same HTTI + fluid model without the absorbing domain
+python3 gen_aniso.py --model models/bakken_b_reference_noabc.json --output-dir out_bakken_noabc --mesh-output no
+```
+
+For the supplied Bakken properties, `V_SH = 2.169912481961472 km/s`. Therefore the last physical radius is `4.4398249639 m` at 1 kHz and `0.3893216643 m` at 15 kHz. With the external one-wavelength ABC layer the total outer radius is `6.6097374459 m` and `0.5339824964 m`, respectively. The original input radii remain unchanged between frequency steps.
+
+Reference-compatibility notes: the supplied MATLAB `KM_el_matrix_HTTI_ABC.m` compares `ABC_account_r` with numeric `1` although the Bakken input sets the string `'yes'`, and it scales the whole `CijMatrix` cumulatively inside the interpolation-node loop. The Python ABC kernel currently reproduces those exact reference semantics so numerical comparisons are meaningful. The MATLAB tree references `KM_el_matrix_HTTI_PML_ABC` but does not contain that function; Python implements the combined branch as the composition of the supplied PML and ABC transforms.
+
+The remaining major source of non-identical MATLAB/Python eigenvalues is meshing: Python currently uses a deterministic ring-based SciPy Delaunay mesh, while MATLAB uses the modified Mesh2D `meshfaces` path with adaptive size control/smoothing. Matching that mesher is a separate portability task.
 
 ## Spectrum post-processing and plotting
 

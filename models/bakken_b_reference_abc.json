@@ -1,0 +1,99 @@
+{
+  "Model": {
+    "DomainRx": [
+      0.1,
+      2.0
+    ],
+    "DomainRy": [
+      0.1,
+      2.0
+    ],
+    "DomainTheta": [
+      0.0,
+      0.0
+    ],
+    "DomainEcc": [
+      0.0,
+      0.0
+    ],
+    "DomainEccAngle": [
+      0.0,
+      0.0
+    ],
+    "LDomain_in_LSH": "yes",
+    "DomainType": [
+      "fluid",
+      "HTTI"
+    ],
+    "AddDomainLoc": "ext",
+    "AddDomainType": "abc",
+    "AddDomainL": 1.0,
+    "PML_factor": 10.0,
+    "PML_degree": 2.0,
+    "PML_method": 2.0,
+    "ABC_factor": 0.1,
+    "ABC_degree": 1.0,
+    "ABC_account_r": "yes",
+    "DomainParam": [
+      [
+        1.0,
+        2.25
+      ],
+      [
+        2.23,
+        40.9,
+        8.5,
+        26.9,
+        10.5,
+        15.3,
+        0.0,
+        0.0
+      ]
+    ],
+    "RefDomainType": [
+      "HTTI"
+    ],
+    "RefDomainParam": [
+      [
+        2.23,
+        40.9,
+        8.5,
+        26.9,
+        10.5,
+        15.3,
+        0.0,
+        0.0
+      ]
+    ],
+    "BCType": [
+      "FS",
+      "rigid"
+    ],
+    "f_array": [
+      1,
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      15
+    ],
+    "DomainNth": [
+      12,
+      12
+    ],
+    "mud_domain": 1
+  },
+  "Advanced": {
+    "num_eig_max": 50,
+    "EigSearchStart": 1.0,
+    "VisualizeMesh": true,
+    "N_nodes": 10,
+    "NEdge_nodes": 4
+  },
+  "Mesh": {
+    "output": "no",
+    "ext_boundary_shape": "cir"
+  }
+}

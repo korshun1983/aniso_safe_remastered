@@ -363,39 +363,86 @@ def _node_var_form(mat_ijab, n_nodes, dvar):
     )
 
 
-@_register("KM_el_matrix_HTTI")
-def KM_el_matrix_HTTI(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps):
-    """Element integrand expansions for the HTTI solid, port of KM_el_matrix_HTTI.m."""
+def _KM_el_matrix_HTTI_core(
+    BasicMatrices,
+    CompStruct,
+    FEMatrices,
+    ii_d,
+    ii_el,
+    ElPhysProps,
+    TriProps,
+    *,
+    lx_by_node=None,
+    ly_by_node=None,
+    cij_scale=None,
+    jacobian_scale=None,
+):
+    """Shared HTTI element kernel with optional PML/ABC node transforms.
+
+    MATLAB's PML implementation replaces Lx/Ly at each interpolation node
+    and multiplies both stiffness and density integrands by the complex
+    coordinate Jacobian.  ABC instead scales Cij.  Keeping those transforms
+    at node level lets the ordinary, PML, ABC and PML+ABC kernels share the
+    same contraction code without changing the SAFE algebra.
+    """
     n_nodes = int(CompStruct.Advanced.N_nodes)
     dvar = int(CompStruct.Data.DVarNum[ii_d])
-    msize = dvar * n_nodes
 
     el_matrices = AttrDict()
     # Prepare various properties
     rho = np.asarray(ElPhysProps.RhoVec, dtype=float)
-    cij_matrix = np.asarray(ElPhysProps.CijMatrix, dtype=float)  # (k, 6, 6)
+    cij_matrix = np.asarray(ElPhysProps.CijMatrix)  # (k, 6, 6)
     dxL = np.asarray(TriProps.dxL, dtype=float)
     dyL = np.asarray(TriProps.dyL, dtype=float)
-    Lx = BasicMatrices.Lx
-    Ly = BasicMatrices.Ly
+    base_lx = np.asarray(BasicMatrices.Lx)
+    base_ly = np.asarray(BasicMatrices.Ly)
     Lz = BasicMatrices.Lz
+
+    if lx_by_node is None:
+        lx_by_node = np.broadcast_to(base_lx, (n_nodes,) + base_lx.shape)
+    else:
+        lx_by_node = np.asarray(lx_by_node)
+    if ly_by_node is None:
+        ly_by_node = np.broadcast_to(base_ly, (n_nodes,) + base_ly.shape)
+    else:
+        ly_by_node = np.asarray(ly_by_node)
+    if cij_scale is None:
+        cij_scale = np.ones(n_nodes, dtype=float)
+    cij_scale = np.asarray(cij_scale)
+    if jacobian_scale is None:
+        jacobian_scale = np.ones(n_nodes, dtype=float)
+    jacobian_scale = np.asarray(jacobian_scale)
+
+    cij_eff = cij_matrix * cij_scale[:, None, None]
 
     nnn = BasicMatrices.NNNConvMatrixInt  # (a, k, b)
     dnnn = BasicMatrices.dNNNConvMatrixInt  # (x, a, k, b)
     nndn = BasicMatrices.NNdNConvMatrixInt  # (x, a, k, b)
     dnndn = BasicMatrices.dNNdNConvMatrixInt  # (x, y, a, k, b)
 
-    # per-node 3x3 products L_?^T * C(k) * L_? (the tensors are real, so the
-    # complex conjugation of the MATLAB code is omitted)
-    LxTCijLx = np.einsum("ia,kij,jb->kab", Lx, cij_matrix, Lx)
-    LxTCijLy = np.einsum("ia,kij,jb->kab", Lx, cij_matrix, Ly)
-    LyTCijLx = np.einsum("ia,kij,jb->kab", Ly, cij_matrix, Lx)
-    LyTCijLy = np.einsum("ia,kij,jb->kab", Ly, cij_matrix, Ly)
-    LxTCijLz = np.einsum("ia,kij,jb->kab", Lx, cij_matrix, Lz)
-    LzTCijLx = np.einsum("ia,kij,jb->kab", Lz, cij_matrix, Lx)
-    LyTCijLz = np.einsum("ia,kij,jb->kab", Ly, cij_matrix, Lz)
-    LzTCijLy = np.einsum("ia,kij,jb->kab", Lz, cij_matrix, Ly)
-    LzTCijLz = np.einsum("ia,kij,jb->kab", Lz, cij_matrix, Lz)
+    # MATLAB uses conj(Lx') rather than Lx'.  For complex PML Lx this is a
+    # plain transpose (no Hermitian conjugation), which the einsums below
+    # reproduce deliberately.
+    LxTCijLx = np.einsum("kia,kij,kjb->kab", lx_by_node, cij_eff, lx_by_node)
+    LxTCijLy = np.einsum("kia,kij,kjb->kab", lx_by_node, cij_eff, ly_by_node)
+    LyTCijLx = np.einsum("kia,kij,kjb->kab", ly_by_node, cij_eff, lx_by_node)
+    LyTCijLy = np.einsum("kia,kij,kjb->kab", ly_by_node, cij_eff, ly_by_node)
+    LxTCijLz = np.einsum("kia,kij,jb->kab", lx_by_node, cij_eff, Lz)
+    LzTCijLx = np.einsum("ia,kij,kjb->kab", Lz, cij_eff, lx_by_node)
+    LyTCijLz = np.einsum("kia,kij,jb->kab", ly_by_node, cij_eff, Lz)
+    LzTCijLy = np.einsum("ia,kij,kjb->kab", Lz, cij_eff, ly_by_node)
+    LzTCijLz = np.einsum("ia,kij,jb->kab", Lz, cij_eff, Lz)
+
+    jac = jacobian_scale[:, None, None]
+    LxTCijLx = LxTCijLx * jac
+    LxTCijLy = LxTCijLy * jac
+    LyTCijLx = LyTCijLx * jac
+    LyTCijLy = LyTCijLy * jac
+    LxTCijLz = LxTCijLz * jac
+    LzTCijLx = LzTCijLx * jac
+    LyTCijLz = LyTCijLz * jac
+    LzTCijLy = LzTCijLy * jac
+    LzTCijLz = LzTCijLz * jac
 
     # B1tCB1(i,j,a,b) = sum_{x,y,k} M1(k,x,y,i,j) * dNNdN(x,y,a,k,b)
     m1 = (
@@ -428,12 +475,174 @@ def KM_el_matrix_HTTI(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhys
     el_matrices.B2tCB2Matrix = _node_var_form(b2tcb2, n_nodes, dvar)
 
     # NtRhoN(i,j,a,b) = IdMatrix(i,j) * sum_k NNN(a,k,b) * Rho(k)
-    s_ab = np.einsum("akb,k->ab", nnn, rho)
-    nt_rho_n = np.zeros((dvar, dvar, n_nodes, n_nodes), dtype=float)
+    s_ab = np.einsum("akb,k->ab", nnn, rho * jacobian_scale)
+    nt_rho_n = np.zeros(
+        (dvar, dvar, n_nodes, n_nodes),
+        dtype=np.result_type(s_ab.dtype, cij_eff.dtype, lx_by_node.dtype, ly_by_node.dtype),
+    )
     for ii in range(dvar):
         nt_rho_n[ii, ii] = s_ab
     el_matrices.NtRhoNMatrix = _node_var_form(nt_rho_n, n_nodes, dvar)
     return el_matrices
+
+
+@_register("KM_el_matrix_HTTI")
+def KM_el_matrix_HTTI(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps):
+    """Element integrand expansions for the ordinary HTTI solid."""
+    return _KM_el_matrix_HTTI_core(
+        BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps
+    )
+
+
+def _abc_cij_scale(CompStruct, FEMatrices, ii_d, ii_el):
+    """Return MATLAB-compatible per-node ABC stiffness multipliers.
+
+    Two details intentionally mirror the supplied reference source exactly:
+    (1) ABC_account_r is tested against numeric 1, so the literal string
+        'yes' does not activate the 1/r factor in that MATLAB version;
+    (2) CijMatrix is multiplied in-place as a whole on every node iteration,
+        so the factor used at node k is the cumulative product through k.
+    """
+    n_nodes = int(CompStruct.Advanced.N_nodes)
+    tri_nodes = FEMatrices.DElements[ii_d][0:10, ii_el].astype(int)
+    xy = FEMatrices.MeshNodes[0:2, tri_nodes]
+    rr = np.sqrt(xy[0] ** 2 + xy[1] ** 2)
+
+    r_zv = float(CompStruct.Model.DomainRx[-2])
+    layer = float(CompStruct.Model.DomainRx[-1]) - r_zv
+    if layer <= 0.0:
+        raise ValueError("ABC layer thickness must be positive")
+    alpha = float(CompStruct.Model.ABC_factor)
+    degree = float(CompStruct.Model.ABC_degree)
+    sigma = alpha * (np.abs(rr - r_zv) / layer) ** degree
+
+    account_r = CompStruct.Model.get("ABC_account_r", 0)
+    if isinstance(account_r, (int, float, np.integer, np.floating)) and float(account_r) == 1.0:
+        sigma = np.divide(sigma, rr, out=np.zeros_like(sigma), where=rr != 0.0)
+
+    node_factor = 1.0 + 1j * sigma
+    if ii_d == int(CompStruct.Data.N_domain) - 1:
+        return np.cumprod(node_factor[:n_nodes])
+    return np.ones(n_nodes, dtype=complex)
+
+
+def _pml_node_transform(CompStruct, BasicMatrices, FEMatrices, ii_d, ii_el):
+    """Port the per-node coordinate stretch from KM_el_matrix_HTTI_PML.m."""
+    n_nodes = int(CompStruct.Advanced.N_nodes)
+    base_lx = np.asarray(BasicMatrices.Lx, dtype=complex)
+    base_ly = np.asarray(BasicMatrices.Ly, dtype=complex)
+    lx = np.broadcast_to(base_lx, (n_nodes,) + base_lx.shape).copy()
+    ly = np.broadcast_to(base_ly, (n_nodes,) + base_ly.shape).copy()
+    jac = np.ones(n_nodes, dtype=complex)
+
+    if ii_d != int(CompStruct.Data.N_domain) - 1:
+        return lx, ly, jac
+
+    tri_nodes = FEMatrices.DElements[ii_d][0:10, ii_el].astype(int)
+    xy_all = FEMatrices.MeshNodes[0:2, tri_nodes]
+    method = int(round(float(CompStruct.Model.PML_method)))
+    degree = float(CompStruct.Model.PML_degree)
+    factor = float(CompStruct.Model.PML_factor)
+    add_loc = str(CompStruct.Model.get("AddDomainLoc", "ext")).lower()
+
+    for kk in range(n_nodes):
+        x = float(xy_all[0, kk])
+        y = float(xy_all[1, kk])
+
+        if method == 1:
+            r_node = float(np.hypot(x, y))
+            if add_loc == "ext":
+                r_zv = min(float(CompStruct.Model.DomainRx[-2]), float(CompStruct.Model.DomainRy[-2]))
+                layer = min(float(CompStruct.Model.DomainRx[-1]), float(CompStruct.Model.DomainRy[-1])) - r_zv
+            elif add_loc == "int":
+                layer = float(CompStruct.Model.AddDomainL_m)
+                r_zv = min(float(CompStruct.Model.DomainRx[-1]), float(CompStruct.Model.DomainRy[-1])) - layer
+            else:
+                raise ValueError(f"Unsupported AddDomainLoc: {add_loc}")
+            if layer <= 0.0:
+                raise ValueError("PML layer thickness must be positive")
+
+            if r_node > r_zv:
+                eta = (r_node - r_zv) / layer
+                sigma_r = eta**degree
+                gamma_r = 1j * factor * sigma_r
+                r_tilde = r_node - 1j * (factor / (degree + 1.0)) * eta ** (degree + 1.0)
+                var_xy = x * x / (gamma_r * r_node * r_node) + y * y / (r_tilde * r_node)
+                var_yx = y * y / (gamma_r * r_node * r_node) + x * x / (r_tilde * r_node)
+                var_all = (1.0 / (gamma_r * r_node * r_node) - 1.0 / (r_tilde * r_node)) * x * y
+                lx[kk] = var_xy * base_lx + var_all * base_ly
+                ly[kk] = var_all * base_lx + var_yx * base_ly
+                jac[kk] = gamma_r * r_tilde / r_node
+
+        elif method == 2:
+            if add_loc == "ext":
+                x_zv = float(CompStruct.Model.DomainRx[-2])
+                lx_layer = float(CompStruct.Model.DomainRx[-1]) - x_zv
+                y_zv = float(CompStruct.Model.DomainRy[-2])
+                ly_layer = float(CompStruct.Model.DomainRy[-1]) - y_zv
+            elif add_loc == "int":
+                lx_layer = float(CompStruct.Model.AddDomainL_m)
+                x_zv = float(CompStruct.Model.DomainRx[-1]) - lx_layer
+                ly_layer = float(CompStruct.Model.AddDomainL_m)
+                # The supplied MATLAB source uses DomainRx here (not DomainRy).
+                y_zv = float(CompStruct.Model.DomainRx[-1]) - ly_layer
+            else:
+                raise ValueError(f"Unsupported AddDomainLoc: {add_loc}")
+            if lx_layer <= 0.0 or ly_layer <= 0.0:
+                raise ValueError("PML layer thickness must be positive")
+
+            gamma_x = 1.0 + 0.0j
+            if abs(x) > x_zv:
+                sigma_x = ((abs(x) - x_zv) / lx_layer) ** degree
+                gamma_x = 1.0 - 1j * factor * sigma_x
+                lx[kk] = (1.0 / gamma_x) * base_lx
+
+            gamma_y = 1.0 + 0.0j
+            if abs(y) > y_zv:
+                sigma_y = ((abs(y) - y_zv) / ly_layer) ** degree
+                gamma_y = 1.0 - 1j * factor * sigma_y
+                ly[kk] = (1.0 / gamma_y) * base_ly
+            jac[kk] = gamma_x * gamma_y
+        else:
+            raise ValueError(f"Unsupported PML_method: {CompStruct.Model.PML_method}")
+
+    return lx, ly, jac
+
+
+@_register("KM_el_matrix_HTTI_ABC")
+def KM_el_matrix_HTTI_ABC(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps):
+    """MATLAB-compatible absorbing-boundary-condition HTTI element kernel."""
+    scale = _abc_cij_scale(CompStruct, FEMatrices, ii_d, ii_el)
+    return _KM_el_matrix_HTTI_core(
+        BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps,
+        cij_scale=scale,
+    )
+
+
+@_register("KM_el_matrix_HTTI_PML")
+def KM_el_matrix_HTTI_PML(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps):
+    """Port of KM_el_matrix_HTTI_PML.m."""
+    lx, ly, jac = _pml_node_transform(CompStruct, BasicMatrices, FEMatrices, ii_d, ii_el)
+    return _KM_el_matrix_HTTI_core(
+        BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps,
+        lx_by_node=lx,
+        ly_by_node=ly,
+        jacobian_scale=jac,
+    )
+
+
+@_register("KM_el_matrix_HTTI_PML_ABC")
+def KM_el_matrix_HTTI_PML_ABC(BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps):
+    """Combined PML+ABC kernel (composition of the two reference transforms)."""
+    lx, ly, jac = _pml_node_transform(CompStruct, BasicMatrices, FEMatrices, ii_d, ii_el)
+    scale = _abc_cij_scale(CompStruct, FEMatrices, ii_d, ii_el)
+    return _KM_el_matrix_HTTI_core(
+        BasicMatrices, CompStruct, FEMatrices, ii_d, ii_el, ElPhysProps, TriProps,
+        lx_by_node=lx,
+        ly_by_node=ly,
+        cij_scale=scale,
+        jacobian_scale=jac,
+    )
 
 
 @_register("KM_matrix_HTTI")
@@ -498,7 +707,10 @@ def _accumulate_element(store, var_vec_arr, matrices):
         rows, cols, vals = store[name]
         rows.append(var_rows)
         cols.append(var_cols)
-        vals.append(np.asarray(mat, dtype=float).reshape(-1, order="F"))
+        # ABC/PML element matrices are complex.  Do not coerce them back to
+        # float during sparse assembly or the attenuation/stretching terms
+        # disappear silently.
+        vals.append(np.asarray(mat).reshape(-1, order="F"))
 
 
 def _store_to_sparse(store, size):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import numpy as np
 
 from .structures import AttrDict
@@ -176,7 +178,11 @@ def St2_2_PrepareModelMethods_sp_SAFE(CompStruct):
 
 def St2_PrepareModel_sp_SAFE(InputParam):
     """Run Step 2 in the same order as St2_PrepareModel_sp_SAFE.m."""
-    CompStruct = InputParam
+    # MATLAB structs have value semantics (copy-on-write).  Keeping a Python
+    # alias here is incorrect because St3 changes the geometry for every
+    # frequency when LDomain_in_LSH='yes'.  Preserve InputParam as the
+    # immutable reference model and mutate an independent computation struct.
+    CompStruct = deepcopy(InputParam)
     CompStruct = St2_1_PrepareModelParams_sp_SAFE(CompStruct)
     CompStruct = St2_2_PrepareModelMethods_sp_SAFE(CompStruct)
     return CompStruct

@@ -26,46 +26,87 @@ def _freq_from_name(path):
 
 
 def _walk_matlab_struct(value):
-    """Yield nested objects from scipy.io.loadmat MATLAB structs."""
+    """Yield nested scipy MATLAB structs and arrays."""
     if isinstance(value, np.ndarray):
         if value.dtype.names:
             yield value
             for name in value.dtype.names:
                 yield from _walk_matlab_struct(value[name])
-        else:
+        elif value.dtype == object:
             for item in value.ravel():
                 yield from _walk_matlab_struct(item)
     elif isinstance(value, np.void) and value.dtype.names:
         yield value
         for name in value.dtype.names:
             yield from _walk_matlab_struct(value[name])
+    elif hasattr(value, "_fieldnames"):
+        yield value
+        for name in value._fieldnames:
+            yield from _walk_matlab_struct(getattr(value, name))
+
+
+def _normalize_eigenvalue_array(value):
+    """Convert MATLAB/Python eig output to the 1-D eigenvalue vector."""
+    arr = np.asarray(value)
+    if not arr.size or not np.issubdtype(arr.dtype, np.number):
+        return None
+    arr = np.asarray(arr, dtype=complex).squeeze()
+    # MATLAB eigs returns REig_vals as a diagonal k-by-k matrix, while the
+    # Python solver stores a vector.  Never flatten the off-diagonal zeros.
+    if arr.ndim == 2 and arr.shape[0] == arr.shape[1]:
+        arr = np.diag(arr)
+    return arr.ravel()
 
 
 def _extract_eigenvalues(obj):
-    """Find an eigenvalue array inside a loaded NPZ/MAT object."""
+    """Find the eigenvalue array without mistaking eigenvectors for values."""
+    preferred = ("eigenvalues", "REig_vals", "Eig_vals", "REig_Lvals")
+
     if isinstance(obj, dict):
-        for key, value in obj.items():
-            if "eig" in str(key).lower():
-                arr = np.asarray(value).squeeze()
-                if arr.size and np.issubdtype(arr.dtype, np.number):
-                    return arr.astype(complex).ravel()
-        for key, value in obj.items():
+        for wanted in preferred:
+            for key, value in obj.items():
+                if str(key).lower() == wanted.lower():
+                    arr = _normalize_eigenvalue_array(value)
+                    if arr is not None:
+                        return arr
+        for value in obj.values():
             arr = _extract_eigenvalues(value)
             if arr is not None:
                 return arr
         return None
-    if isinstance(obj, np.ndarray) and obj.dtype.names:
-        for name in obj.dtype.names:
-            if "eig" in name.lower():
-                arr = np.asarray(obj[name]).squeeze()
-                if arr.size and np.issubdtype(arr.dtype, np.number):
-                    return arr.astype(complex).ravel()
-        for name in obj.dtype.names:
-            arr = _extract_eigenvalues(obj[name])
+
+    if hasattr(obj, "_fieldnames"):
+        fields = list(obj._fieldnames)
+        for wanted in preferred:
+            for name in fields:
+                if name.lower() == wanted.lower():
+                    arr = _normalize_eigenvalue_array(getattr(obj, name))
+                    if arr is not None:
+                        return arr
+        for name in fields:
+            arr = _extract_eigenvalues(getattr(obj, name))
             if arr is not None:
                 return arr
-    return None
+        return None
 
+    if isinstance(obj, np.ndarray):
+        if obj.dtype.names:
+            for wanted in preferred:
+                for name in obj.dtype.names:
+                    if name.lower() == wanted.lower():
+                        arr = _normalize_eigenvalue_array(obj[name])
+                        if arr is not None:
+                            return arr
+            for name in obj.dtype.names:
+                arr = _extract_eigenvalues(obj[name])
+                if arr is not None:
+                    return arr
+        elif obj.dtype == object:
+            for item in obj.ravel():
+                arr = _extract_eigenvalues(item)
+                if arr is not None:
+                    return arr
+    return None
 
 def load_result_file(path):
     """Load one Results file from NPZ or MAT format."""
@@ -76,7 +117,7 @@ def load_result_file(path):
         eigenvalues = _extract_eigenvalues(payload)
         return DispersionRecord(_freq_from_name(path), eigenvalues if eigenvalues is not None else np.zeros(0, complex), path)
     if path.suffix.lower() == ".mat":
-        data = loadmat(path, squeeze_me=False, struct_as_record=False)
+        data = loadmat(path, squeeze_me=True, struct_as_record=False)
         eigenvalues = _extract_eigenvalues(data)
         return DispersionRecord(_freq_from_name(path), eigenvalues if eigenvalues is not None else np.zeros(0, complex), path)
     raise ValueError(f"Unsupported result file: {path}")
